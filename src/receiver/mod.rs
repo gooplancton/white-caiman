@@ -1,25 +1,19 @@
-use anyhow::{anyhow, bail};
+use anyhow::{bail, Context};
 use futures::{SinkExt, StreamExt};
 use std::path::Path;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::core::{
     file_tree::{FileTree, TreeDiff},
     message::FileChangeMessage,
 };
 
-pub struct Receiver<P>
-where
-    P: AsRef<Path>,
-{
+pub struct Receiver<P: AsRef<Path>> {
     port: u32,
     out_dir: P,
 }
 
-impl<P> Receiver<P>
-where
-    P: AsRef<Path>,
-{
+impl<P: AsRef<Path>> Receiver<P> {
     pub fn new(port: u32, out_dir: P) -> Self {
         Self { port, out_dir }
     }
@@ -30,23 +24,43 @@ where
         let listener = TcpListener::bind(&addr).await?;
         println!("WebSocket server listening on {}", addr.as_str());
 
-        let (stream, _) = listener.accept().await?;
+        tokio::select! {
+            res = listener.accept() => {
+                let (stream, _) = res.unwrap();
+                self.sync_dir(&tree, stream).await?
+            }
+
+            _ = tokio::signal::ctrl_c() => {
+                println!("Shutting down gracefully");
+            }
+        };
+
+        Ok(())
+    }
+
+    async fn sync_dir(&self, tree: &FileTree, stream: TcpStream) -> anyhow::Result<()> {
         let socket = tokio_tungstenite::accept_async(stream).await?;
         let (mut write, mut read) = socket.split();
 
         let initial_message = read
             .next()
             .await
-            .ok_or(anyhow!("unexpected end of stream"))??;
+            .context("Unexpected end of stream, sender did not send initial directoy state")??;
 
         let initial_message = match initial_message {
             tungstenite::Message::Binary(bin) => bin,
-            _ => bail!("incorrect initial message format"),
+            _ => bail!("Incorrect initial message format, expected binary message"),
         };
 
         let remote_tree: FileTree = bincode::deserialize(&initial_message)?;
-        let diff = TreeDiff::from(&tree, &remote_tree);
-        let requested_files = diff.apply(self.out_dir.as_ref()).await?;
+        if !remote_tree.is_valid() {
+            bail!("Invalid file tree received, aborting")
+        }
+
+        let diff = TreeDiff::from(tree, &remote_tree);
+        let requested_files = diff.apply(self.out_dir.as_ref()).await;
+        println!("Initial sync completed\n{}", &diff);
+
         let encoded = bincode::serialize(&requested_files)?;
         write.send(tungstenite::Message::binary(encoded)).await?;
 
@@ -57,10 +71,15 @@ where
 
             let message: FileChangeMessage = match message.unwrap() {
                 tungstenite::Message::Binary(bin) => bincode::deserialize(bin.as_slice()).unwrap(),
-                _ => continue,
+                _ => {
+                    eprintln!("Received non-binary message, ignoring");
+                    continue;
+                }
             };
 
-            let _ = self.handle_message(message).await;
+            if let Err(err) = self.handle_message(message).await {
+                eprintln!("An error occurred while handling message: {}", err);
+            };
         }
 
         Ok(())
@@ -81,9 +100,12 @@ where
                 let to = self.out_dir.as_ref().join(new_path);
                 tokio::fs::rename(from, to).await?;
             }
-            FileChangeMessage::DirectoryCreated(path) => {
+            FileChangeMessage::EmptyDirectoryCreated(path) => {
                 let dir_path = self.out_dir.as_ref().join(path);
                 tokio::fs::create_dir(dir_path).await?;
+            }
+            FileChangeMessage::DirectoryCreated(path, zipped) => {
+                todo!()
             }
             FileChangeMessage::DirectoryDeleted(path) => {
                 let dir_path = self.out_dir.as_ref().join(path);

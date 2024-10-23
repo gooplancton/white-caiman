@@ -5,27 +5,22 @@ use bytes::Bytes;
 use futures::stream::{SplitSink, StreamExt};
 use futures::SinkExt;
 use std::path::{Path, PathBuf};
+use std::process;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::Message;
 
-use crate::core::file_change::SortedFileChanges;
+use crate::core::file_change::{FileChange, SortedFileChanges};
 use crate::core::file_tree::FileTree;
 use crate::core::message::FileChangeMessage;
 
-pub struct Sender<'command, P>
-where
-    P: AsRef<Path>,
-{
-    dir_path: P,
+pub struct Sender<'command, P: AsRef<Path>> {
     listener_addr: &'command str,
+    dir_path: P,
 }
 
-impl<'command, P> Sender<'command, P>
-where
-    P: AsRef<Path>,
-{
+impl<'command, P: AsRef<Path>> Sender<'command, P> {
     pub fn new(dir_path: P, listener_addr: &'command str) -> Self {
         Self {
             listener_addr,
@@ -40,7 +35,9 @@ where
         let (mut write, mut read) = stream.split();
 
         let encoded = bincode::serialize(&tree)?;
+        println!("Sending initial directory state");
         write.send(Message::Binary(encoded)).await?;
+        println!("Initial state sent, starting sync");
 
         let res = read
             .next()
@@ -64,15 +61,22 @@ where
                     let truncated_path = path.strip_prefix(&self.dir_path).unwrap().to_owned();
                     let message = FileChangeMessage::FileEdited(truncated_path, contents);
                     let encoded = bincode::serialize(&message).unwrap();
-                    let _ = write.send(Message::Binary(encoded)).await;
+                    if let Err(err) = write.send(Message::Binary(encoded)).await {
+                        eprintln!("error occurred while sending message: {}", err);
+                    }
                 }
             }
         } else {
-            bail!("incorrect first message format");
+            bail!("Incorrect message format received from listener, expected binary message");
         }
 
+        println!("Initial sync completed");
+
         if watch {
+            println!("Watching for changes");
             self.watch_dir(write).await?;
+        } else {
+            write.close().await?;
         }
 
         Ok(())
@@ -84,26 +88,42 @@ where
     ) -> anyhow::Result<()> {
         let mut subscription = watcher::watch_dir(self.dir_path.as_ref()).await?;
 
-        while let Ok(data) = subscription.next().await {
-            let files = match data {
-                watchman_client::SubscriptionData::FilesChanged(res) => res.files,
-                _ => continue,
-            };
+        loop {
+            tokio::select! {
+                Ok(data) = subscription.next() => {
+                    let files = match data {
+                        watchman_client::SubscriptionData::FilesChanged(res) => res.files,
+                        _ => continue,
+                    };
 
-            if files.is_none() || files.as_ref().unwrap().is_empty() {
-                continue;
-            }
+                    if files.is_none() || files.as_ref().unwrap().is_empty() {
+                        continue;
+                    }
 
-            let files = files.unwrap();
-            let mut changes = SortedFileChanges::from(self.dir_path.as_ref().to_owned(), files);
-            while let Some(message) = changes.next_message().await {
-                let message_bin = bincode::serialize(&message);
-                if let Ok(message_bin) = message_bin {
-                    let _ = write.send(Message::binary(message_bin)).await;
+                    let files = files.unwrap();
+                    self.handle_file_changes(&mut write, files).await;
+                }
+
+                _ = tokio::signal::ctrl_c() => {
+                    println!("Exiting");
+                    write.close().await?;
+                    break Ok(());
                 }
             }
         }
+    }
 
-        Ok(())
+    async fn handle_file_changes(
+        &self,
+        write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+        files: Vec<FileChange>,
+    ) {
+        let mut changes = SortedFileChanges::from(self.dir_path.as_ref().to_owned(), files);
+        while let Some(message) = changes.next_message().await {
+            let encoded = bincode::serialize(&message).unwrap();
+            if let Err(err) = write.send(Message::Binary(encoded)).await {
+                eprintln!("error occurred while sending message: {}", err);
+            }
+        }
     }
 }

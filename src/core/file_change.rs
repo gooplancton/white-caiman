@@ -80,13 +80,15 @@ impl SortedFileChanges {
         let exists = this_change.exists.into_inner();
         if exists {
             let message = match (is_dir, is_new) {
-                (true, true) => FileChangeMessage::DirectoryCreated(this_path),
                 (true, false) => FileChangeMessage::DirectoryContentsEdited(this_path),
                 (false, true) => FileChangeMessage::FileCreated(this_path),
                 (false, false) => {
                     let file_path = self.root_path.join(&this_path);
-                    let contents = tokio::fs::read(file_path).await.unwrap();
+                    let contents = tokio::fs::read(file_path).await.unwrap(); // TODO: handle this
                     FileChangeMessage::FileEdited(this_path, Bytes::from(contents))
+                }
+                (true, true) => {
+                    FileChangeMessage::EmptyDirectoryCreated(this_path)
                 }
             };
 
@@ -107,6 +109,9 @@ impl SortedFileChanges {
         }
 
         let next_change = self.pop().unwrap();
-        Some(FileChangeMessage::Rename(this_path, next_change.name.to_path_buf()))
+        Some(FileChangeMessage::Rename(
+            this_path,
+            next_change.name.to_path_buf(),
+        ))
     }
 }

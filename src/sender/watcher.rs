@@ -1,21 +1,18 @@
-#![allow(deprecated)]
 use std::path::Path;
 
 use crate::core::file_change::FileChange;
-use anyhow::anyhow;
+use anyhow::Context;
 use watchman_client::{CanonicalPath, Connector, Subscription};
 
 use watchman_client::prelude::*;
 
 pub async fn watch_dir(path: &Path) -> anyhow::Result<Subscription<FileChange>> {
-    let client = Connector::new().connect().await.map_err(|_| {
-        anyhow!("could not connect to watchman server, make sure it is installed on your system")
-    })?;
+    let client = Connector::new().connect().await.context(
+        "Could not connect to watchman server, make sure it is installed on your system",
+    )?;
 
     let path = CanonicalPath::canonicalize(path)?;
-
     let resolved = client.resolve_root(path).await?;
-
     let (subscription, _) = client
         .subscribe::<FileChange>(
             &resolved,

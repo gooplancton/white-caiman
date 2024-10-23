@@ -1,8 +1,10 @@
-#![allow(dead_code)]
-
 use anyhow::bail;
 use sha1::{Digest, Sha1};
-use std::path::{Path, PathBuf};
+use std::{
+    fmt::Display,
+    fs,
+    path::{Path, PathBuf},
+};
 use walkdir::WalkDir;
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,10 @@ impl FileTree {
 
     pub async fn new(base_path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let base_path = base_path.as_ref();
+        if !base_path.try_exists().is_ok_and(|exists| exists) {
+            fs::create_dir(base_path)?;
+        }
+
         if !base_path.is_dir() {
             bail!("provided path is not a directory")
         }
@@ -87,22 +93,88 @@ impl FileTree {
 
         Ok(Self { n_dirs, nodes })
     }
+
+    pub fn is_valid(&self) -> bool {
+        let dirs = self.nodes.get(..self.n_dirs).unwrap();
+        let files = self.nodes.get(self.n_dirs..).unwrap();
+
+        if !dirs
+            .iter()
+            .all(|node| matches!(node.typ, FileTreeNodeType::Dir))
+        {
+            return false;
+        }
+
+        if !files
+            .iter()
+            .all(|node| matches!(node.typ, FileTreeNodeType::File { sha1: _ }))
+        {
+            return false;
+        }
+
+        fn is_sorted(nodes: &[FileTreeNode]) -> bool {
+            for (i, node) in nodes.iter().enumerate() {
+                if nodes
+                    .get(i + 1)
+                    .is_some_and(|next_node| node.path > next_node.path)
+                {
+                    return false;
+                }
+            }
+
+            true
+        }
+
+        is_sorted(dirs) && is_sorted(files)
+    }
 }
 
 #[derive(Debug)]
-pub struct TreeDiff<'remote> {
-    created_dirs: Vec<&'remote Path>,
-    deleted_dirs: Vec<&'remote Path>,
-    created_files: Vec<&'remote Path>,
-    deleted_files: Vec<&'remote Path>,
-    edited_files: Vec<&'remote Path>,
+pub struct TreeDiff<'message> {
+    created_dirs: Vec<&'message Path>,
+    deleted_dirs: Vec<&'message Path>,
+    created_files: Vec<&'message Path>,
+    deleted_files: Vec<&'message Path>,
+    edited_files: Vec<&'message Path>,
 }
 
-impl<'remote> TreeDiff<'remote> {
-    pub fn from<'local>(local_tree: &'local FileTree, remote_tree: &'remote FileTree) -> Self
-    where
-        'local: 'remote,
-    {
+impl Display for TreeDiff<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Created Directories:")?;
+        for &created_dir in self.created_dirs.iter() {
+            f.write_str("\n  - ")?;
+            f.write_str(created_dir.to_str().unwrap())?;
+        }
+
+        f.write_str("\nDeleted Directories:")?;
+        for &deleted_dir in self.deleted_dirs.iter() {
+            f.write_str("\n  - ")?;
+            f.write_str(deleted_dir.to_str().unwrap())?;
+        }
+
+        f.write_str("\nDeleted Files:")?;
+        for &deleted_file in self.deleted_files.iter() {
+            f.write_str("\n  - ")?;
+            f.write_str(deleted_file.to_str().unwrap())?;
+        }
+
+        f.write_str("\nRequested Files from Sender:")?;
+        for &created_file in self.created_files.iter() {
+            f.write_str("\n  - ")?;
+            f.write_str(created_file.to_str().unwrap())?;
+        }
+
+        for &edited_file in self.edited_files.iter() {
+            f.write_str("\n  - ")?;
+            f.write_str(edited_file.to_str().unwrap())?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<'message> TreeDiff<'message> {
+    pub fn from(local_tree: &'message FileTree, remote_tree: &'message FileTree) -> Self {
         let local_dirs = local_tree.dirs();
         let remote_dirs = remote_tree.dirs();
         let (created_dirs, deleted_dirs, _) = diff(local_dirs, remote_dirs);
@@ -120,7 +192,7 @@ impl<'remote> TreeDiff<'remote> {
         }
     }
 
-    pub async fn apply(&self, root_path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    pub async fn apply(&self, root_path: &Path) -> Vec<PathBuf> {
         for deleted_dir in self.deleted_dirs.iter() {
             let path = root_path.join(deleted_dir);
             let _ = tokio::fs::remove_dir_all(path).await;
@@ -147,7 +219,7 @@ impl<'remote> TreeDiff<'remote> {
             requested_files.push(path.to_owned())
         }
 
-        Ok(requested_files)
+        requested_files
     }
 }
 
@@ -165,14 +237,17 @@ fn diff<'remote, 'local: 'remote>(
 
         match local_node.path.cmp(&remote_node.path) {
             std::cmp::Ordering::Equal => {
-                if let FileTreeNodeType::File { sha1: local_sha1 } = local_node.typ {
-                    if let FileTreeNodeType::File { sha1: remote_sha1 } = remote_node.typ {
+                match (&local_node.typ, &remote_node.typ) {
+                    (
+                        FileTreeNodeType::File { sha1: local_sha1 },
+                        FileTreeNodeType::File { sha1: remote_sha1 },
+                    ) => {
                         if local_sha1 != remote_sha1 {
                             edited_paths.push(local_node.path.as_path());
                         }
-                    } else {
-                        panic!("trying to compare file with directory")
                     }
+                    (FileTreeNodeType::Dir, FileTreeNodeType::Dir) => (),
+                    _ => unreachable!(),
                 }
 
                 local_idx += 1;

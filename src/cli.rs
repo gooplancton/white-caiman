@@ -1,3 +1,5 @@
+use std::process;
+
 use clap::{Parser, Subcommand};
 
 use crate::{receiver, sender};
@@ -41,11 +43,19 @@ impl Cli {
         match &self.command {
             Commands::Sync { from, to, watch } => {
                 let sender = sender::Sender::new(from, to.as_str());
-                sender.start(*watch).await.unwrap();
+                let res = sender.start(*watch).await;
+                if let Err(err) = res {
+                    println!("An error occurred:\n{}", err);
+                    process::exit(1)
+                }
             }
             Commands::Listen { port, output_dir } => {
                 let receiver = receiver::Receiver::new(*port, output_dir);
-                receiver.start().await.unwrap();
+                let res = receiver.start().await;
+                if let Err(err) = res {
+                    println!("An error occurred:\n{}", err);
+                    process::exit(1)
+                }
             }
         }
     }
