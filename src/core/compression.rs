@@ -12,8 +12,6 @@ pub async fn compress_dir(path: impl AsRef<Path>) -> anyhow::Result<Bytes> {
     let inner = tar.into_inner().await.context("finalzing archive")?;
     let inner_bytes = Bytes::from(inner);
 
-    dbg!(path.as_ref(), &inner_bytes);
-
     Ok(inner_bytes)
 }
 

@@ -1,4 +1,8 @@
-use std::{fmt::Display, path::Path};
+use std::{
+    collections::BTreeMap,
+    fmt::Display,
+    path::{Path, PathBuf},
+};
 
 use super::{
     file_tree::{FileTree, FileTreeNodeType},
@@ -16,34 +20,120 @@ pub struct TreeDiff<'message> {
 
 impl Display for TreeDiff<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("\nDeleted Directories:")?;
-        for &deleted_dir in self.deleted_dirs.iter() {
-            f.write_str("\n  - ")?;
-            f.write_str(deleted_dir.to_str().unwrap())?;
+        // Symbols for different states
+        const DELETED: &str = "✗"; // Red X for deleted
+        const CREATED: &str = "+"; // Plus for created
+        const EDITED: &str = "✎"; // Pencil for edited
+        const TREE_BRANCH: &str = "├── ";
+        const TREE_CORNER: &str = "└── ";
+        const TREE_VERTICAL: &str = "│   ";
+        const TREE_SPACE: &str = "    ";
+
+        // Create a tree structure
+        let mut tree: BTreeMap<PathBuf, (String, bool)> = BTreeMap::new(); // (symbol, is_dir)
+
+        // Helper to get parent paths
+        let get_parents = |path: &Path| {
+            let mut parents = vec![];
+            let mut current = path;
+            while let Some(parent) = current.parent() {
+                if !parent.as_os_str().is_empty() {
+                    parents.push(parent.to_path_buf());
+                }
+                current = parent;
+            }
+            parents
+        };
+
+        // Add all paths to the tree with their symbols
+        for &path in self.deleted_dirs.iter() {
+            for parent in get_parents(path) {
+                tree.entry(parent).or_insert_with(|| ("".to_string(), true));
+            }
+            tree.insert(path.to_path_buf(), (DELETED.to_string(), true));
         }
 
-        f.write_str("\nDeleted Files:")?;
-        for &deleted_file in self.deleted_files.iter() {
-            f.write_str("\n  - ")?;
-            f.write_str(deleted_file.to_str().unwrap())?;
+        for &path in self.deleted_files.iter() {
+            for parent in get_parents(path) {
+                tree.entry(parent).or_insert_with(|| ("".to_string(), true));
+            }
+            tree.insert(path.to_path_buf(), (DELETED.to_string(), false));
         }
 
-        f.write_str("\nRequested Directories from Sender:")?;
-        for &created_dir in self.created_dirs.iter() {
-            f.write_str("\n  - ")?;
-            f.write_str(created_dir.to_str().unwrap())?;
+        for &path in self.created_dirs.iter() {
+            for parent in get_parents(path) {
+                tree.entry(parent).or_insert_with(|| ("".to_string(), true));
+            }
+            tree.insert(path.to_path_buf(), (CREATED.to_string(), true));
         }
 
-        f.write_str("\nRequested Files from Sender:")?;
-        for &created_file in self.created_files.iter() {
-            f.write_str("\n  - ")?;
-            f.write_str(created_file.to_str().unwrap())?;
+        for &path in self.created_files.iter() {
+            for parent in get_parents(path) {
+                tree.entry(parent).or_insert_with(|| ("".to_string(), true));
+            }
+            tree.insert(path.to_path_buf(), (CREATED.to_string(), false));
         }
 
-        for &edited_file in self.edited_files.iter() {
-            f.write_str("\n  - ")?;
-            f.write_str(edited_file.to_str().unwrap())?;
+        for &path in self.edited_files.iter() {
+            for parent in get_parents(path) {
+                tree.entry(parent).or_insert_with(|| ("".to_string(), true));
+            }
+            tree.insert(path.to_path_buf(), (EDITED.to_string(), false));
         }
+
+        // Helper function to recursively print the tree
+        fn print_tree(
+            f: &mut std::fmt::Formatter<'_>,
+            tree: &BTreeMap<PathBuf, (String, bool)>,
+            current_path: &Path,
+            prefix: &str,
+            is_last: bool,
+        ) -> std::fmt::Result {
+            let node = &tree.get(current_path);
+            let is_dir = node.as_ref().map(|node| node.1).unwrap_or(false);
+
+            // Print current node
+            if !current_path.as_os_str().is_empty() {
+                let connector = if is_last { TREE_CORNER } else { TREE_BRANCH };
+                writeln!(
+                    f,
+                    "{}{}{} {}{}",
+                    prefix,
+                    connector,
+                    node.as_ref()
+                        .map(|node| node.0.as_str())
+                        .unwrap_or_default(),
+                    current_path.file_name().unwrap().to_str().unwrap(),
+                    if is_dir { "/" } else { "" }
+                )?;
+            }
+
+            // Get children of current path
+            let children: Vec<_> = tree
+                .keys()
+                .filter(|p| p.parent() == Some(current_path))
+                .collect();
+
+            // Recursively print children
+            for (i, child) in children.iter().enumerate() {
+                let is_last_child = i == children.len() - 1;
+                let new_prefix = if current_path.as_os_str().is_empty() {
+                    "".to_string()
+                } else if is_last {
+                    format!("{}{}", prefix, TREE_SPACE)
+                } else {
+                    format!("{}{}", prefix, TREE_VERTICAL)
+                };
+
+                print_tree(f, tree, child, &new_prefix, is_last_child)?;
+            }
+
+            Ok(())
+        }
+
+        // Print the complete tree starting from root
+        writeln!(f, ".")?;
+        print_tree(f, &tree, Path::new(""), "", true)?;
 
         Ok(())
     }
