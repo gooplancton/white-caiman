@@ -17,3 +17,9 @@ pub enum FileChangeMessage {
     Rename(OldPath, NewPath),
     DirectoryContentsEdited(PathBuf),
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum RequestMessage {
+    File(PathBuf),
+    Dir(PathBuf)
+}

@@ -6,11 +6,12 @@ use std::{
     path::PathBuf,
 };
 
+use anyhow::Context;
 use bytes::Bytes;
 use serde::Deserialize;
 use watchman_client::prelude::*;
 
-use super::message::FileChangeMessage;
+use super::{compression::compress_dir, message::FileChangeMessage, utils::is_dir_empty};
 
 query_result_type! {
     pub struct FileChange {
@@ -88,7 +89,16 @@ impl SortedFileChanges {
                     FileChangeMessage::FileEdited(this_path, Bytes::from(contents))
                 }
                 (true, true) => {
-                    FileChangeMessage::EmptyDirectoryCreated(this_path)
+                    if is_dir_empty(this_path.as_path()) {
+                        FileChangeMessage::EmptyDirectoryCreated(this_path)
+                    } else {
+                        let contents = compress_dir(this_path.as_path())
+                            .await
+                            .context("compressing dir")
+                            .unwrap();
+
+                        FileChangeMessage::DirectoryCreated(this_path, contents)
+                    }
                 }
             };
 
@@ -115,3 +125,4 @@ impl SortedFileChanges {
         ))
     }
 }
+

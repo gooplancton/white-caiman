@@ -4,7 +4,7 @@ use std::path::Path;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::core::{
-    file_tree::{FileTree, TreeDiff},
+    compression::decompress_dir, file_tree::FileTree, file_tree_diff::TreeDiff,
     message::FileChangeMessage,
 };
 
@@ -69,8 +69,12 @@ impl<P: AsRef<Path>> Receiver<P> {
                 continue;
             }
 
-            let message: FileChangeMessage = match message.unwrap() {
-                tungstenite::Message::Binary(bin) => bincode::deserialize(bin.as_slice()).unwrap(),
+            let message: FileChangeMessage = match message.as_ref().unwrap() {
+                tungstenite::Message::Binary(bin) => bincode::deserialize(bin).unwrap(),
+                tungstenite::Message::Close(_) => {
+                    println!("Stream closed, exiting");
+                    break;
+                }
                 _ => {
                     eprintln!("Received non-binary message, ignoring");
                     continue;
@@ -104,8 +108,10 @@ impl<P: AsRef<Path>> Receiver<P> {
                 let dir_path = self.out_dir.as_ref().join(path);
                 tokio::fs::create_dir(dir_path).await?;
             }
-            FileChangeMessage::DirectoryCreated(path, zipped) => {
-                todo!()
+            FileChangeMessage::DirectoryCreated(path, compressed) => {
+                let dir_path = self.out_dir.as_ref().join(path);
+                tokio::fs::create_dir(dir_path.as_path()).await?;
+                decompress_dir(dir_path.as_path(), compressed.as_ref()).await?;
             }
             FileChangeMessage::DirectoryDeleted(path) => {
                 let dir_path = self.out_dir.as_ref().join(path);
