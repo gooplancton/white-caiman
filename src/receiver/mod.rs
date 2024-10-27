@@ -59,7 +59,9 @@ impl<P: AsRef<Path>> Receiver<P> {
 
         let diff = TreeDiff::from(tree, &remote_tree);
         let requested_files = diff.apply(self.out_dir.as_ref()).await;
-        println!("Initial sync completed\n{}", &diff);
+        println!("Applied diff:\n{}", &diff);
+
+        println!("Initial sync completed");
 
         let encoded = bincode::serialize(&requested_files)?;
         write.send(tungstenite::Message::binary(encoded)).await?;
